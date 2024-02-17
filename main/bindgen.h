@@ -45,6 +45,10 @@ static void print_odin_type(Cuik_Type* type, int depth, bool top) {
 
         case KIND_STRUCT:
         case KIND_UNION: {
+            if (strcmp(type->record.name, "_iobuf") == 0) {
+                bindgen_printf("libc.FILE");
+                break;
+            }
             if (type->record.kid_count == 0) {
                 bindgen_printf("struct {}");
                 break;
@@ -85,6 +89,12 @@ static void print_odin_type(Cuik_Type* type, int depth, bool top) {
             if (base->kind == KIND_CHAR) {
                 bindgen_printf("cstring");
                 break;
+            } else if (base->kind == KIND_STRUCT || base->kind == KIND_UNION) {
+                ptrdiff_t search = nl_map_get_cstr(already_defined, base->record.name);
+                if (search < 0) {
+                    bindgen_printf("rawptr");
+                    break;
+                }
             }
 
             bindgen_printf("^");
@@ -294,7 +304,6 @@ int run_bindgen(int argc, const char** argv) {
             bindgen_printf("// TU %s\n", filename);
 
             for (size_t i = 0; i < stmt_count; i++) {
-                // only keep the declarations in the main file (or other files in this bindgen)
                 ResolvedSourceLoc r = cuikpp_find_location(tokens, stmts[i]->loc.start);
                 if (!is_in_sources(files_data, num_files, r.file->filename)) {
                     continue;
@@ -304,22 +313,29 @@ int run_bindgen(int argc, const char** argv) {
                 Cuik_Type* type = cuik_canonical_type(stmts[i]->decl.type);
 
                 if (stmts[i]->decl.attrs.is_typedef) {
-                    ptrdiff_t search = nl_map_get_cstr(already_defined, name);
+                    ptrdiff_t search = nl_map_get(typedefs, type);
                     if (search < 0) {
-                        nl_map_put_cstr(already_defined, name, 1);
+                        // mark as defined
+                        nl_map_put(typedefs, type, name);
 
-                        ptrdiff_t search = nl_map_get(typedefs, type);
-                        if (search < 0) {
-                            // mark as defined
-                            nl_map_put(typedefs, type, name);
+                        if (type->kind == KIND_STRUCT || type->kind == KIND_UNION) {
+                            // Assuming that this is a typedef and a struct definition
+                            ptrdiff_t search = nl_map_get_cstr(already_defined, type->record.name);
+                            if (search < 0) {
+                                nl_map_put_cstr(already_defined, type->record.name, 1);
 
-                            // typedef
+                                bindgen_printf("%s :: ", type->record.name);
+                                print_odin_type(type, 0, true);
+                                bindgen_printf("\n");
+
+                                bindgen_printf("%s :: %s\n", name, type->record.name);
+
+                            }
+                        } else {
                             bindgen_printf("%s :: ", name);
                             print_odin_type(type, 0, true);
                             bindgen_printf("\n");
                         }
-                    } else {
-                        nl_map_put(typedefs, type, name);
                     }
                 } else if (type->kind == KIND_FUNC) {
                     // normal function
@@ -332,7 +348,14 @@ int run_bindgen(int argc, const char** argv) {
                         bindgen_printf("\n");
                     }
                 } else {
-                    // printf("TODO: globals!\n");
+                    ptrdiff_t search = nl_map_get_cstr(already_defined, name);
+                    if (search < 0) {
+                        nl_map_put_cstr(already_defined, name, 1);
+
+                        bindgen_printf("%s : ", name);
+                        print_odin_type(type, 0, true);
+                        bindgen_printf(" = %u\n", stmts[i]->decl.local_ordinal);
+                    }
                 }
             }
 
