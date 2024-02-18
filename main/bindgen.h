@@ -15,6 +15,124 @@ static void bindgen_printf(char *fmt, ...) {
     va_end(args);
 }
 
+static void bindgen_panic(char *msg) {
+    puts(msg);
+    exit(1);
+}
+
+static void print_odin_value(Cuik_Expr *expr, int depth, bool top) {
+    switch (expr->exprs->op) {
+        case EXPR_NONE:
+            break;
+
+        case EXPR_INT:
+            bindgen_printf("%lld", expr->exprs->int_lit.lit);
+            break;
+        case EXPR_ENUM:
+            // TODO: Expose the enum and then use the key/name here
+            bindgen_printf("%d", expr->exprs->enum_val.num->value);
+            break;
+        case EXPR_FLOAT32:
+        case EXPR_FLOAT64:
+            bindgen_printf("%f", expr->exprs->float_lit);
+            break;
+
+        case EXPR_WCHAR:
+            break;
+        case EXPR_CHAR:
+            bindgen_printf("%c", expr->exprs->char_lit);
+            break;
+        case EXPR_WSTR:
+            break;
+        case EXPR_STR:
+            size_t len = expr->exprs->str.end - expr->exprs->str.start;
+            char *terminated = (char *)cuik_malloc(len + 1);
+            memcpy(terminated, expr->exprs->str.start, len); 
+            terminated[len] = '\0';
+            bindgen_printf("%s", terminated);
+            cuik_free(terminated);
+            break;
+
+        case EXPR_BUILTIN_SYMBOL:
+        case EXPR_UNKNOWN_SYMBOL:
+        case EXPR_SYMBOL:
+        case EXPR_CONSTRUCTOR:
+        case EXPR_GENERIC: // C11's _Generic
+        case EXPR_VA_ARG:
+
+        case EXPR_INITIALIZER:
+
+        case EXPR_CAST:
+        case EXPR_PARAM: // special case of EXPR_VAR
+        case EXPR_ASSIGN:
+        case EXPR_PLUS_ASSIGN:
+        case EXPR_MINUS_ASSIGN:
+        case EXPR_TIMES_ASSIGN:
+        case EXPR_SLASH_ASSIGN:
+        case EXPR_PERCENT_ASSIGN:
+        case EXPR_AND_ASSIGN:
+        case EXPR_OR_ASSIGN:
+        case EXPR_XOR_ASSIGN:
+        case EXPR_SHL_ASSIGN:
+        case EXPR_SHR_ASSIGN:
+
+        case EXPR_PLUS:
+        case EXPR_MINUS:
+        case EXPR_TIMES:
+        case EXPR_SLASH:
+        case EXPR_PERCENT:
+        case EXPR_AND:
+        case EXPR_OR:
+        case EXPR_XOR:
+        case EXPR_SHL:
+        case EXPR_SHR:
+
+        case EXPR_CMPEQ:
+        case EXPR_CMPNE:
+        case EXPR_CMPGE:
+        case EXPR_CMPLE:
+        case EXPR_CMPGT:
+        case EXPR_CMPLT:
+
+        // tese are resolved by semantics pass
+        case EXPR_PTRADD:
+        case EXPR_PTRSUB:
+        case EXPR_PTRDIFF:
+
+        case EXPR_TERNARY:
+        case EXPR_COMMA:
+
+        case EXPR_LOGICAL_NOT:
+        case EXPR_LOGICAL_AND:
+        case EXPR_LOGICAL_OR:
+
+        case EXPR_DEREF:
+        case EXPR_ADDR:
+        case EXPR_NEGATE:
+        case EXPR_NOT:
+        case EXPR_SUBSCRIPT:
+        case EXPR_DOT:
+        case EXPR_ARROW:
+        case EXPR_DOT_R:
+        case EXPR_ARROW_R:
+        case EXPR_CALL:
+
+        case EXPR_SWIZZLE: // GLSL stuff, .xyxy
+
+        case EXPR_SIZEOF_T: // on type
+        case EXPR_SIZEOF:   // on expr
+        case EXPR_ALIGNOF_T:// on type
+
+        case EXPR_PRE_INC:
+        case EXPR_PRE_DEC:
+        case EXPR_POST_INC:
+        case EXPR_POST_DEC:
+            break;
+        default:
+            bindgen_panic("Unhandled case in print_odin_value");break;
+    }
+}
+
 static void print_odin_type(Cuik_Type* type, int depth, bool top) {
     if (type->kind == KIND_STRUCT || type->kind == KIND_UNION) {
         while (type != type->record.nominal) {
@@ -45,10 +163,6 @@ static void print_odin_type(Cuik_Type* type, int depth, bool top) {
 
         case KIND_STRUCT:
         case KIND_UNION: {
-            if (strcmp(type->record.name, "_iobuf") == 0) {
-                bindgen_printf("libc.FILE");
-                break;
-            }
             if (type->record.kid_count == 0) {
                 bindgen_printf("struct {}");
                 break;
@@ -90,10 +204,12 @@ static void print_odin_type(Cuik_Type* type, int depth, bool top) {
                 bindgen_printf("cstring");
                 break;
             } else if (base->kind == KIND_STRUCT || base->kind == KIND_UNION) {
-                ptrdiff_t search = nl_map_get_cstr(already_defined, base->record.name);
-                if (search < 0) {
-                    bindgen_printf("rawptr");
-                    break;
+                if (base->record.name) {
+                    ptrdiff_t search = nl_map_get_cstr(already_defined, base->record.name);
+                    if (search < 0) {
+                        bindgen_printf("rawptr");
+                        break;
+                    }
                 }
             }
 
@@ -115,7 +231,7 @@ static void print_odin_type(Cuik_Type* type, int depth, bool top) {
             break;
         }
 
-        default: bindgen_printf("// BINDGEN ERROR: Unhandled case (%d)", type->kind); break;
+        default: bindgen_panic("Unhandled case in print_odin_type"); break;
     }
 }
 
@@ -291,6 +407,8 @@ int run_bindgen(int argc, const char** argv) {
         }
 
         bindgen_printf("package %s\n\nimport \"core:c\"\n\n", package_name);
+        bindgen_printf("foreign import %s \"%s.lib\"\n", package_name, package_name);
+        bindgen_printf("foreign %s {\n", package_name);
         CUIK_FOR_EACH_TU(tu, cu) {
             size_t stmt_count = cuik_num_of_top_level_stmts(tu);
             Stmt** stmts = cuik_get_top_level_stmts(tu);
@@ -320,16 +438,22 @@ int run_bindgen(int argc, const char** argv) {
 
                         if (type->kind == KIND_STRUCT || type->kind == KIND_UNION) {
                             // Assuming that this is a typedef and a struct definition
-                            ptrdiff_t search = nl_map_get_cstr(already_defined, type->record.name);
-                            if (search < 0) {
-                                nl_map_put_cstr(already_defined, type->record.name, 1);
+                            if (type->record.name) {
+                                ptrdiff_t search = nl_map_get_cstr(already_defined, type->record.name);
+                                if (search < 0) {
+                                    nl_map_put_cstr(already_defined, type->record.name, 1);
 
-                                bindgen_printf("%s :: ", type->record.name);
+                                    bindgen_printf("%s :: ", type->record.name);
+                                    print_odin_type(type, 0, true);
+                                    bindgen_printf("\n");
+
+                                    bindgen_printf("%s :: %s\n", name, type->record.name);
+
+                                }
+                            } else {
+                                bindgen_printf("%s :: ", name);
                                 print_odin_type(type, 0, true);
                                 bindgen_printf("\n");
-
-                                bindgen_printf("%s :: %s\n", name, type->record.name);
-
                             }
                         } else {
                             bindgen_printf("%s :: ", name);
@@ -343,9 +467,11 @@ int run_bindgen(int argc, const char** argv) {
                     if (search < 0) {
                         nl_map_put_cstr(already_defined, name, 1);
 
-                        bindgen_printf("%s :: ", name);
-                        print_odin_type(type, 0, true);
-                        bindgen_printf("\n");
+                        if (!stmts[i]->decl.attrs.is_extern) {
+                            bindgen_printf("%s :: ", name);
+                            print_odin_type(type, 0, true);
+                            bindgen_printf("\n");
+                        }
                     }
                 } else {
                     ptrdiff_t search = nl_map_get_cstr(already_defined, name);
@@ -354,7 +480,9 @@ int run_bindgen(int argc, const char** argv) {
 
                         bindgen_printf("%s : ", name);
                         print_odin_type(type, 0, true);
-                        bindgen_printf(" = %u\n", stmts[i]->decl.local_ordinal);
+                        bindgen_printf(" = ");
+                        print_odin_value(stmts[i]->decl.initial, 0, true);
+                        bindgen_printf("\n");
                     }
                 }
             }
@@ -362,6 +490,7 @@ int run_bindgen(int argc, const char** argv) {
             nl_map_free(typedefs);
         }
 
+        bindgen_printf("}\n");
         fclose(bindgen_file);
     }
 
